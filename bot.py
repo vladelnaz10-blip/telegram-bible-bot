@@ -46,7 +46,7 @@ conn.commit()
 
 # ================= CALLBACK DATA =================
 class MediaCallback(CallbackData, prefix="m"):
-    action: str  # list / play / page
+    action: str  # list / play / page / menu
     cat: str
     item_id: int = 0
     page: int = 0
@@ -55,6 +55,18 @@ class MediaCallback(CallbackData, prefix="m"):
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+
+# ================= ГЛАВНОЕ МЕНЮ =================
+def main_menu_keyboard():
+    kb = [
+        [InlineKeyboardButton(text=name, callback_data=MediaCallback(action="list", cat=key, page=0).pack())]
+        for key, name in CATEGORY_TO_NAME.items()
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+@dp.message(CommandStart())
+async def cmd_start(message: types.Message):
+    await message.answer("✝ Выберите тему:", reply_markup=main_menu_keyboard())
 
 # ================= СОХРАНЕНИЕ ИЗ ГРУППЫ =================
 @dp.message(F.chat.id == GROUP_ID)
@@ -111,20 +123,10 @@ async def handle_group_message(message: types.Message):
     except sqlite3.IntegrityError:
         pass
 
-# ================= ГЛАВНОЕ МЕНЮ =================
-@dp.message(CommandStart())
-async def cmd_start(message: types.Message):
-    kb = [
-        [InlineKeyboardButton(text=name, callback_data=MediaCallback(action="list", cat=key, page=0).pack())]
-        for key, name in CATEGORY_TO_NAME.items()
-    ]
-    await message.answer("✝ Выберите тему:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-
 # ================= СПИСОК ФАЙЛОВ С ПАГИНАЦИЕЙ =================
 PER_PAGE = 5
 
-@dp.callback_query(MediaCallback.filter(F.action == "list"))
-@dp.callback_query(MediaCallback.filter(F.action == "page"))
+@dp.callback_query(MediaCallback.filter(F.action.in_(["list", "page"])))
 async def show_list(callback: types.CallbackQuery, callback_data: MediaCallback):
     cat = callback_data.cat
     page = callback_data.page
@@ -152,11 +154,13 @@ async def show_list(callback: types.CallbackQuery, callback_data: MediaCallback)
             callback_data=MediaCallback(action="play", cat=cat, item_id=item_id).pack()
         )])
 
+    # Навигация с кнопкой "Главное меню"
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton("⬅ Назад", callback_data=MediaCallback(action="page", cat=cat, page=page-1).pack()))
     if offset + PER_PAGE < total:
         nav.append(InlineKeyboardButton("Дальше ➡", callback_data=MediaCallback(action="page", cat=cat, page=page+1).pack()))
+    nav.append(InlineKeyboardButton("🏠 Главное меню", callback_data=MediaCallback(action="menu", cat="").pack()))
 
     if nav:
         kb.append(nav)
@@ -164,6 +168,15 @@ async def show_list(callback: types.CallbackQuery, callback_data: MediaCallback)
     await callback.message.edit_text(
         f"{CATEGORY_TO_NAME[cat]}\nСтраница {page+1}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
+    )
+    await callback.answer()
+
+# ================= ОБРАБОТКА ГЛАВНОГО МЕНЮ =================
+@dp.callback_query(MediaCallback.filter(F.action == "menu"))
+async def go_to_menu(callback: types.CallbackQuery, callback_data: MediaCallback):
+    await callback.message.edit_text(
+        "✝ Выберите тему:",
+        reply_markup=main_menu_keyboard()
     )
     await callback.answer()
 
