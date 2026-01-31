@@ -29,7 +29,7 @@ CATEGORY_TO_NAME = {
 }
 
 # ================= БАЗА ДАННЫХ =================
-conn = sqlite3.connect("media.db")
+conn = sqlite3.connect("media.db", check_same_thread=False)
 cursor = conn.cursor()
 
 cursor.execute("""
@@ -52,7 +52,10 @@ class MediaCallback(CallbackData, prefix="m"):
     page: int = 0
 
 # ================= БОТ =================
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
@@ -71,13 +74,15 @@ async def cmd_start(message: types.Message):
 # ================= СОХРАНЕНИЕ ИЗ ГРУППЫ =================
 @dp.message(F.chat.id == GROUP_ID)
 async def handle_group_message(message: types.Message):
-    print("ПОЛУЧЕНО СООБЩЕНИЕ В ГРУППЕ")
-    
-    if message.message_thread_id is None:
+    thread_id = message.message_thread_id
+    logging.info(f"Получено сообщение в группе, thread_id={thread_id}")
+
+    if thread_id is None:
         return
 
-    category = TOPIC_TO_CATEGORY.get(message.message_thread_id)
+    category = TOPIC_TO_CATEGORY.get(thread_id)
     if not category:
+        logging.info(f"Неизвестная тема {thread_id} — пропускаем")
         return
 
     file_id = None
@@ -86,20 +91,23 @@ async def handle_group_message(message: types.Message):
     # -------- Определяем заголовок --------
     title = message.caption
 
-    if not title and message.audio:
-        if message.audio.title:
-            title = message.audio.title
-            if message.audio.performer:
-                title = f"{message.audio.performer} – {title}"
-        elif message.audio.file_name:
-            title = message.audio.file_name.rsplit('.', 1)[0]
+    if not title:
+        if message.audio:
+            if message.audio.title:
+                title = message.audio.title
+                if message.audio.performer:
+                    title = f"{message.audio.performer} – {title}"
+            elif message.audio.file_name:
+                title = message.audio.file_name.rsplit('.', 1)[0]
+        elif message.document and message.document.mime_type.startswith("audio/"):
+            title = message.document.file_name.rsplit('.', 1)[0]
 
     if not title:
         title = f"Проповедь от {datetime.now().strftime('%d.%m.%Y %H:%M')}"
 
     title = title[:200]
 
-    # -------- Определяем тип --------
+    # -------- Определяем тип и file_id --------
     if message.video:
         file_id = message.video.file_id
         media_type = "video"
@@ -109,19 +117,24 @@ async def handle_group_message(message: types.Message):
     elif message.voice:
         file_id = message.voice.file_id
         media_type = "audio"
+    elif message.document and message.document.mime_type.startswith("audio/"):
+        file_id = message.document.file_id
+        media_type = "audio"
 
     if not file_id:
+        logging.info("Не найдено подходящего медиа — пропускаем")
         return
 
+    # -------- Добавляем в базу --------
     try:
         cursor.execute(
             "INSERT INTO media (file_id, media_type, title, category, added_at) VALUES (?, ?, ?, ?, ?)",
             (file_id, media_type, title, category, datetime.now().isoformat())
         )
         conn.commit()
-        print(f"Добавлено: {title}")
+        logging.info(f"Добавлено: {title}")
     except sqlite3.IntegrityError:
-        pass
+        logging.info("Дубликат file_id — пропущено")
 
 # ================= СПИСОК ФАЙЛОВ С ПАГИНАЦИЕЙ =================
 PER_PAGE = 5
@@ -142,7 +155,7 @@ async def show_list(callback: types.CallbackQuery, callback_data: MediaCallback)
     rows = cursor.fetchall()
 
     if not rows:
-        await callback.answer("Пусто")
+        await callback.answer("В этой теме пока нет файлов")
         return
 
     kb = []
@@ -154,7 +167,7 @@ async def show_list(callback: types.CallbackQuery, callback_data: MediaCallback)
             callback_data=MediaCallback(action="play", cat=cat, item_id=item_id).pack()
         )])
 
-    # Навигация с кнопкой "Главное меню"
+    # Навигация
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton("⬅ Назад", callback_data=MediaCallback(action="page", cat=cat, page=page-1).pack()))
@@ -192,16 +205,19 @@ async def play_media(callback: types.CallbackQuery, callback_data: MediaCallback
 
     file_id, mtype, title = row
 
-    if mtype == "video":
-        await callback.message.answer_video(file_id, caption=title, supports_streaming=True)
-    else:
-        await callback.message.answer_audio(file_id, caption=title)
-
-    await callback.answer("Отправляю...")
+    try:
+        if mtype == "video":
+            await callback.message.answer_video(file_id, caption=title, supports_streaming=True)
+        else:
+            await callback.message.answer_audio(file_id, caption=title)
+        await callback.answer("Отправляю...")
+    except Exception as e:
+        logging.error(f"Ошибка воспроизведения: {e}")
+        await callback.answer("Ошибка отправки файла")
 
 # ================= ЗАПУСК =================
 async def main():
-    print("Бот запущен")
+    logging.info("Бот запущен")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
