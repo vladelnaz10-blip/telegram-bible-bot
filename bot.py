@@ -59,6 +59,8 @@ dp = Dispatcher()
 # ================= СОХРАНЕНИЕ ИЗ ГРУППЫ =================
 @dp.message(F.chat.id == GROUP_ID)
 async def handle_group_message(message: types.Message):
+    print("ПОЛУЧЕНО СООБЩЕНИЕ В ГРУППЕ")
+    
     if message.message_thread_id is None:
         return
 
