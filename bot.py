@@ -8,7 +8,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters.callback_data import CallbackData
 
 # ================= НАСТРОЙКИ =================
-TOKEN = "7987408393:AAHGmLA9wBs6u90GBKBSap17MyBG7hniStM"
+TOKEN = "7987408393:AAEcD5EQ1A-P5meFqrWpVohPjGxN0PvRp5g"
 GROUP_ID = -1001336256088  # ID твоей группы
 
 # ID тем (топиков) → категория
