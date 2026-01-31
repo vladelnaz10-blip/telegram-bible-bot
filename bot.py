@@ -29,7 +29,7 @@ CATEGORY_TO_NAME = {
 }
 
 # ================= БАЗА ДАННЫХ =================
-conn = sqlite3.connect("media.db", check_same_thread=False)
+conn = sqlite3.connect("media.db")
 cursor = conn.cursor()
 
 cursor.execute("""
@@ -47,17 +47,67 @@ conn.commit()
 # ================= CALLBACK DATA =================
 class MediaCallback(CallbackData, prefix="m"):
     action: str  # list / play / page / menu
-    cat: str
+    cat: str = ""
     item_id: int = 0
     page: int = 0
 
 # ================= БОТ =================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+
+# ================= СОХРАНЕНИЕ ИЗ ГРУППЫ =================
+@dp.message(F.chat.id == GROUP_ID)
+async def handle_group_message(message: types.Message):
+    if message.message_thread_id is None:
+        return
+
+    category = TOPIC_TO_CATEGORY.get(message.message_thread_id)
+    if not category:
+        return
+
+    file_id = None
+    media_type = None
+
+    # -------- Определяем заголовок --------
+    title = message.caption
+
+    if not title and message.audio:
+        if message.audio.title:
+            title = message.audio.title
+            if message.audio.performer:
+                title = f"{message.audio.performer} – {title}"
+        elif message.audio.file_name:
+            title = message.audio.file_name.rsplit('.', 1)[0]
+
+    if not title:
+        title = f"Проповедь от {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+
+    title = title[:200]
+
+    # -------- Определяем тип --------
+    if message.video:
+        file_id = message.video.file_id
+        media_type = "video"
+    elif message.audio:
+        file_id = message.audio.file_id
+        media_type = "audio"
+    elif message.voice:
+        file_id = message.voice.file_id
+        media_type = "audio"
+
+    if not file_id:
+        return
+
+    try:
+        cursor.execute(
+            "INSERT INTO media (file_id, media_type, title, category, added_at) VALUES (?, ?, ?, ?, ?)",
+            (file_id, media_type, title, category, datetime.now().isoformat())
+        )
+        conn.commit()
+        print(f"Добавлено: {title}")
+    except sqlite3.IntegrityError:
+        pass
 
 # ================= ГЛАВНОЕ МЕНЮ =================
 def main_menu_keyboard():
@@ -71,78 +121,10 @@ def main_menu_keyboard():
 async def cmd_start(message: types.Message):
     await message.answer("✝ Выберите тему:", reply_markup=main_menu_keyboard())
 
-# ================= СОХРАНЕНИЕ ИЗ ГРУППЫ =================
-@dp.message(F.chat.id == GROUP_ID)
-async def handle_group_message(message: types.Message):
-    thread_id = message.message_thread_id
-    logging.info(f"Получено сообщение в группе, thread_id={thread_id}")
-
-    if thread_id is None:
-        return
-
-    category = TOPIC_TO_CATEGORY.get(thread_id)
-    if not category:
-        logging.info(f"Неизвестная тема {thread_id} — пропускаем")
-        return
-
-    file_id = None
-    media_type = None
-
-    # -------- Определяем заголовок --------
-    title = message.caption
-
-    if not title:
-        if message.audio:
-            if message.audio.title:
-                title = message.audio.title
-                if message.audio.performer:
-                    title = f"{message.audio.performer} – {title}"
-            elif message.audio.file_name:
-                title = message.audio.file_name.rsplit('.', 1)[0]
-        elif message.document and message.document.mime_type.startswith("audio/"):
-            title = message.document.file_name.rsplit('.', 1)[0]
-
-    if not title:
-        title = f"Проповедь от {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-
-    title = title[:200]
-
-    # -------- Определяем тип и file_id --------
-    if message.video:
-        file_id = message.video.file_id
-        media_type = "video"
-    elif message.audio:
-        file_id = message.audio.file_id
-        media_type = "audio"
-    elif message.voice:
-        file_id = message.voice.file_id
-        media_type = "audio"
-    elif message.document and message.document.mime_type.startswith("audio/"):
-        file_id = message.document.file_id
-        media_type = "audio"
-
-    if not file_id:
-        logging.info("Не найдено подходящего медиа — пропускаем")
-        return
-
-    # -------- Добавляем в базу --------
-    try:
-        cursor.execute(
-            "INSERT INTO media (file_id, media_type, title, category, added_at) VALUES (?, ?, ?, ?, ?)",
-            (file_id, media_type, title, category, datetime.now().isoformat())
-        )
-        conn.commit()
-        logging.info(f"Добавлено: {title}")
-    except sqlite3.IntegrityError:
-        logging.info("Дубликат file_id — пропущено")
-
 # ================= СПИСОК ФАЙЛОВ С ПАГИНАЦИЕЙ =================
 PER_PAGE = 5
 
-@dp.callback_query(MediaCallback.filter(F.action.in_(["list", "page"])))
-async def show_list(callback: types.CallbackQuery, callback_data: MediaCallback):
-    cat = callback_data.cat
-    page = callback_data.page
+async def show_media_list(callback: types.CallbackQuery, cat: str, page: int):
     offset = page * PER_PAGE
 
     cursor.execute("SELECT COUNT(*) FROM media WHERE category=?", (cat,))
@@ -155,7 +137,7 @@ async def show_list(callback: types.CallbackQuery, callback_data: MediaCallback)
     rows = cursor.fetchall()
 
     if not rows:
-        await callback.answer("В этой теме пока нет файлов")
+        await callback.answer("Пусто")
         return
 
     kb = []
@@ -167,16 +149,16 @@ async def show_list(callback: types.CallbackQuery, callback_data: MediaCallback)
             callback_data=MediaCallback(action="play", cat=cat, item_id=item_id).pack()
         )])
 
-    # Навигация
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton("⬅ Назад", callback_data=MediaCallback(action="page", cat=cat, page=page-1).pack()))
     if offset + PER_PAGE < total:
         nav.append(InlineKeyboardButton("Дальше ➡", callback_data=MediaCallback(action="page", cat=cat, page=page+1).pack()))
-    nav.append(InlineKeyboardButton("🏠 Главное меню", callback_data=MediaCallback(action="menu", cat="").pack()))
-
     if nav:
         kb.append(nav)
+
+    # Кнопка «Главное меню»
+    kb.append([InlineKeyboardButton("🏠 Главное меню", callback_data=MediaCallback(action="menu").pack())])
 
     await callback.message.edit_text(
         f"{CATEGORY_TO_NAME[cat]}\nСтраница {page+1}",
@@ -184,14 +166,9 @@ async def show_list(callback: types.CallbackQuery, callback_data: MediaCallback)
     )
     await callback.answer()
 
-# ================= ОБРАБОТКА ГЛАВНОГО МЕНЮ =================
-@dp.callback_query(MediaCallback.filter(F.action == "menu"))
-async def go_to_menu(callback: types.CallbackQuery, callback_data: MediaCallback):
-    await callback.message.edit_text(
-        "✝ Выберите тему:",
-        reply_markup=main_menu_keyboard()
-    )
-    await callback.answer()
+@dp.callback_query(MediaCallback.filter(F.action.in_(["list", "page"])))
+async def handle_list_page(callback: types.CallbackQuery, callback_data: MediaCallback):
+    await show_media_list(callback, callback_data.cat, callback_data.page)
 
 # ================= ВОСПРОИЗВЕДЕНИЕ =================
 @dp.callback_query(MediaCallback.filter(F.action == "play"))
@@ -205,20 +182,29 @@ async def play_media(callback: types.CallbackQuery, callback_data: MediaCallback
 
     file_id, mtype, title = row
 
-    try:
-        if mtype == "video":
-            await callback.message.answer_video(file_id, caption=title, supports_streaming=True)
-        else:
-            await callback.message.answer_audio(file_id, caption=title)
-        await callback.answer("Отправляю...")
-    except Exception as e:
-        logging.error(f"Ошибка воспроизведения: {e}")
-        await callback.answer("Ошибка отправки файла")
+    if mtype == "video":
+        await callback.message.answer_video(file_id, caption=title, supports_streaming=True)
+    else:
+        await callback.message.answer_audio(file_id, caption=title)
+
+    await callback.answer("Отправляю...")
+
+# ================= КНОПКА «ГЛАВНОЕ МЕНЮ» =================
+@dp.callback_query(MediaCallback.filter(F.action == "menu"))
+async def go_main_menu(callback: types.CallbackQuery, callback_data: MediaCallback):
+    await callback.message.edit_text("✝ Выберите тему:", reply_markup=main_menu_keyboard())
+    await callback.answer()
 
 # ================= ЗАПУСК =================
 async def main():
-    logging.info("Бот запущен")
-    await dp.start_polling(bot)
+    print("Бот запускается...")
+
+    # Авто-сброс webhook и очистка старых обновлений
+    await bot.delete_webhook(drop_pending_updates=True)
+    print("Старый webhook удалён, старые обновления сброшены")
+
+    # Запуск бота
+    await dp.start_polling(bot, drop_pending_updates=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
