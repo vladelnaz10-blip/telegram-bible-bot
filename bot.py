@@ -1,17 +1,18 @@
 import asyncio
 import logging
+import os
 import sqlite3
 from datetime import datetime
+from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters.callback_data import CallbackData
 
 # ================= НАСТРОЙКИ =================
-TOKEN = "7987408393:AAEcD5EQ1A-P5meFqrWpVohPjGxN0PvRp5g"
-GROUP_ID = -1001336256088  # ID твоей группы
+TOKEN = os.getenv("7987408393:AAG0TxijzjkGw297oKLQhfbJ2flJo-GRvEw")  # токен берется из Render
+GROUP_ID = -1001336256088
 
-# ID тем (топиков) → категория
 TOPIC_TO_CATEGORY = {
     519: "bible",
     453: "bread",
@@ -29,7 +30,7 @@ CATEGORY_TO_NAME = {
 }
 
 # ================= БАЗА ДАННЫХ =================
-conn = sqlite3.connect("media.db")
+conn = sqlite3.connect("media.db", check_same_thread=False)
 cursor = conn.cursor()
 
 cursor.execute("""
@@ -46,7 +47,7 @@ conn.commit()
 
 # ================= CALLBACK DATA =================
 class MediaCallback(CallbackData, prefix="m"):
-    action: str  # list / play / page / menu
+    action: str
     cat: str = ""
     item_id: int = 0
     page: int = 0
@@ -55,6 +56,20 @@ class MediaCallback(CallbackData, prefix="m"):
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+
+# ================= ВЕБ-СЕРВЕР ДЛЯ RENDER (ЭМУЛЯЦИЯ ПОРТА) =================
+async def healthcheck(request):
+    return web.Response(text="Bot is running")
+
+async def start_webserver():
+    port = int(os.environ.get("PORT", 10000))
+    app = web.Application()
+    app.router.add_get("/", healthcheck)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Web server started on port {port}")
 
 # ================= СОХРАНЕНИЕ ИЗ ГРУППЫ =================
 @dp.message(F.chat.id == GROUP_ID)
@@ -68,24 +83,16 @@ async def handle_group_message(message: types.Message):
 
     file_id = None
     media_type = None
-
-    # -------- Определяем заголовок --------
     title = message.caption
 
     if not title and message.audio:
-        if message.audio.title:
-            title = message.audio.title
-            if message.audio.performer:
-                title = f"{message.audio.performer} – {title}"
-        elif message.audio.file_name:
-            title = message.audio.file_name.rsplit('.', 1)[0]
+        title = message.audio.title or message.audio.file_name
 
     if not title:
-        title = f"Проповедь от {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+        title = f"Проповедь {datetime.now().strftime('%d.%m.%Y %H:%M')}"
 
     title = title[:200]
 
-    # -------- Определяем тип --------
     if message.video:
         file_id = message.video.file_id
         media_type = "video"
@@ -109,10 +116,11 @@ async def handle_group_message(message: types.Message):
     except sqlite3.IntegrityError:
         pass
 
-# ================= ГЛАВНОЕ МЕНЮ =================
+# ================= МЕНЮ =================
 def main_menu_keyboard():
     kb = [
-        [InlineKeyboardButton(text=name, callback_data=MediaCallback(action="list", cat=key, page=0).pack())]
+        [InlineKeyboardButton(text=name,
+         callback_data=MediaCallback(action="list", cat=key, page=0).pack())]
         for key, name in CATEGORY_TO_NAME.items()
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
@@ -121,12 +129,11 @@ def main_menu_keyboard():
 async def cmd_start(message: types.Message):
     await message.answer("✝ Выберите тему:", reply_markup=main_menu_keyboard())
 
-# ================= СПИСОК ФАЙЛОВ С ПАГИНАЦИЕЙ =================
+# ================= СПИСОК =================
 PER_PAGE = 5
 
 async def show_media_list(callback: types.CallbackQuery, cat: str, page: int):
     offset = page * PER_PAGE
-
     cursor.execute("SELECT COUNT(*) FROM media WHERE category=?", (cat,))
     total = cursor.fetchone()[0]
 
@@ -143,22 +150,23 @@ async def show_media_list(callback: types.CallbackQuery, cat: str, page: int):
     kb = []
     for item_id, title, mtype in rows:
         emoji = "🎥" if mtype == "video" else "🎵"
-        text = f"{emoji} {title[:35]}..."
         kb.append([InlineKeyboardButton(
-            text=text,
+            text=f"{emoji} {title[:35]}...",
             callback_data=MediaCallback(action="play", cat=cat, item_id=item_id).pack()
         )])
 
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton("⬅ Назад", callback_data=MediaCallback(action="page", cat=cat, page=page-1).pack()))
+        nav.append(InlineKeyboardButton("⬅ Назад",
+                   callback_data=MediaCallback(action="page", cat=cat, page=page-1).pack()))
     if offset + PER_PAGE < total:
-        nav.append(InlineKeyboardButton("Дальше ➡", callback_data=MediaCallback(action="page", cat=cat, page=page+1).pack()))
+        nav.append(InlineKeyboardButton("Дальше ➡",
+                   callback_data=MediaCallback(action="page", cat=cat, page=page+1).pack()))
     if nav:
         kb.append(nav)
 
-    # Кнопка «Главное меню»
-    kb.append([InlineKeyboardButton("🏠 Главное меню", callback_data=MediaCallback(action="menu").pack())])
+    kb.append([InlineKeyboardButton("🏠 Главное меню",
+               callback_data=MediaCallback(action="menu").pack())])
 
     await callback.message.edit_text(
         f"{CATEGORY_TO_NAME[cat]}\nСтраница {page+1}",
@@ -175,13 +183,11 @@ async def handle_list_page(callback: types.CallbackQuery, callback_data: MediaCa
 async def play_media(callback: types.CallbackQuery, callback_data: MediaCallback):
     cursor.execute("SELECT file_id, media_type, title FROM media WHERE id=?", (callback_data.item_id,))
     row = cursor.fetchone()
-
     if not row:
         await callback.answer("Файл не найден")
         return
 
     file_id, mtype, title = row
-
     if mtype == "video":
         await callback.message.answer_video(file_id, caption=title, supports_streaming=True)
     else:
@@ -189,22 +195,17 @@ async def play_media(callback: types.CallbackQuery, callback_data: MediaCallback
 
     await callback.answer("Отправляю...")
 
-# ================= КНОПКА «ГЛАВНОЕ МЕНЮ» =================
 @dp.callback_query(MediaCallback.filter(F.action == "menu"))
-async def go_main_menu(callback: types.CallbackQuery, callback_data: MediaCallback):
+async def go_main_menu(callback: types.CallbackQuery):
     await callback.message.edit_text("✝ Выберите тему:", reply_markup=main_menu_keyboard())
     await callback.answer()
 
 # ================= ЗАПУСК =================
 async def main():
     print("Бот запускается...")
-
-    # Авто-сброс webhook и очистка старых обновлений
+    await start_webserver()  # <-- открываем порт для Render
     await bot.delete_webhook(drop_pending_updates=True)
-    print("Старый webhook удалён, старые обновления сброшены")
-
-    # Запуск бота
-    await dp.start_polling(bot, drop_pending_updates=True)
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
